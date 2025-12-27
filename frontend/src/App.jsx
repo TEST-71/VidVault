@@ -214,9 +214,15 @@ export default function App() {
               <div style={{ backgroundColor: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', marginBottom: '2rem' }}>
                 {videoData.thumbnail && (
                   <img 
-                    src={videoData.thumbnail} 
+                    src={videoData.thumbnail}
                     alt={videoData.title}
                     style={{ width: '100%', height: 'auto', display: 'block', maxHeight: '400px', objectFit: 'cover' }}
+                    onError={(e) => {
+                      // If direct URL fails, try proxy endpoint
+                      if (!e.target.src.includes('api/thumbnail')) {
+                        e.target.src = `http://localhost:5000/api/thumbnail?url=${encodeURIComponent(videoData.thumbnail)}`;
+                      }
+                    }}
                   />
                 )}
                 <div style={{ padding: '2rem' }}>
@@ -248,7 +254,7 @@ export default function App() {
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.75rem' }}>
                       {videoData.availableFormats.video.map((fmt) => (
                         <button
-                          key={fmt.quality}
+                          key={fmt.quality + fmt.format + fmt.fileSize}
                           onClick={() => handleStartDownload('video', fmt.quality, fmt.format)}
                           style={{
                             padding: '12px',
@@ -279,7 +285,7 @@ export default function App() {
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.75rem' }}>
                       {videoData.availableFormats.audio.map((fmt) => (
                         <button
-                          key={fmt.quality}
+                          key={fmt.quality + fmt.format + fmt.fileSize}
                           onClick={() => handleStartDownload('audio', fmt.quality, fmt.format)}
                           style={{
                             padding: '12px',

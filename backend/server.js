@@ -59,6 +59,60 @@ const activeDownloads = new Map();
 
 // ==================== API Routes ====================
 
+// Thumbnail proxy endpoint
+app.get('/api/thumbnail', async (req, res) => {
+  try {
+    const { url } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter required' });
+    }
+
+    // Decode the URL
+    const decodedUrl = decodeURIComponent(url);
+    
+    // Fetch the image with proper headers to bypass restrictions
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    try {
+      const response = await fetch(decodedUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://www.instagram.com/',
+          'Accept': 'image/*',
+        },
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch thumbnail: ${response.status}`);
+      }
+
+      // Forward the image with proper headers
+      const contentType = response.headers.get('content-type');
+      res.set('Content-Type', contentType || 'image/jpeg');
+      res.set('Cache-Control', 'public, max-age=3600');
+      res.set('Access-Control-Allow-Origin', '*');
+      
+      // Use arrayBuffer() instead of buffer()
+      const buffer = Buffer.from(await response.arrayBuffer());
+      res.send(buffer);
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      if (fetchError.name === 'AbortError') {
+        throw new Error('Thumbnail fetch timeout');
+      }
+      throw fetchError;
+    }
+  } catch (error) {
+    console.error('Error fetching thumbnail:', error.message);
+    res.status(500).json({ error: 'Failed to fetch thumbnail' });
+  }
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'VidVault Backend is running' });
@@ -206,7 +260,15 @@ app.post('/api/download', async (req, res) => {
           fs.mkdirSync(outputPath, { recursive: true });
         }
 
-        const filePath = await downloadVideo(url, quality, format, outputPath);
+        // Callback function to update progress
+        const onProgress = (progress) => {
+          if (activeDownloads.has(jobId)) {
+            const download = activeDownloads.get(jobId);
+            download.progress = progress;
+          }
+        };
+
+        const filePath = await downloadVideo(url, quality, format, outputPath, onProgress);
         
         if (activeDownloads.has(jobId)) {
           const download = activeDownloads.get(jobId);

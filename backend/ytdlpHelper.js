@@ -66,7 +66,7 @@ export async function getVideoInfo(url) {
             type: data._type || 'video',
             title: data.title || 'Untitled',
             description: data.description || '',
-            thumbnail: data.thumbnail || '',
+            thumbnail: getThumbnail(data),
             duration: data.duration || 0,
             durationFormatted: formatDuration(data.duration || 0),
             uploader: data.uploader || data.channel || 'Unknown',
@@ -99,7 +99,7 @@ export async function getVideoInfo(url) {
  * @param {string} outputPath - Directory to save file
  * @returns {Promise<string>} Downloaded file path
  */
-export async function downloadVideo(url, quality, format, outputPath) {
+export async function downloadVideo(url, quality, format, outputPath, onProgress = null) {
   return new Promise((resolve, reject) => {
     const outputTemplate = path.join(outputPath, '%(title)s.%(ext)s');
     
@@ -109,7 +109,8 @@ export async function downloadVideo(url, quality, format, outputPath) {
       '-f', buildFormatString(quality, format),
       '-o', outputTemplate,
       '--no-warnings',
-      '--merge-output-format', 'mp4'
+      '--merge-output-format', 'mp4',
+      '--progress-template', '[download] %(progress._percent_str)s'
     ];
 
     // For audio only
@@ -136,7 +137,17 @@ export async function downloadVideo(url, quality, format, outputPath) {
     }, 600000); // 10 minute timeout
 
     ytDlpProcess.stdout.on('data', (data) => {
-      console.log('Download progress:', data.toString());
+      const output = data.toString();
+      console.log('Download progress:', output);
+      
+      // Parse progress percentage from yt-dlp output
+      if (onProgress) {
+        const progressMatch = output.match(/\[download\]\s+([\d.]+)%/);
+        if (progressMatch) {
+          const progress = Math.min(Math.round(parseFloat(progressMatch[1])), 99);
+          onProgress(progress);
+        }
+      }
     });
 
     ytDlpProcess.stderr.on('data', (data) => {
@@ -189,6 +200,23 @@ export async function downloadVideo(url, quality, format, outputPath) {
 }
 
 /**
+ * Helper: Get thumbnail from different sources
+ */
+function getThumbnail(data) {
+  // Try different thumbnail sources
+  if (data.thumbnail) return data.thumbnail;
+  if (data.thumbnails && Array.isArray(data.thumbnails) && data.thumbnails.length > 0) {
+    // Return the last/largest thumbnail
+    return data.thumbnails[data.thumbnails.length - 1].url;
+  }
+  if (data.thumb) return data.thumb;
+  if (data.artwork && Array.isArray(data.artwork) && data.artwork.length > 0) {
+    return data.artwork[0];
+  }
+  return '';
+}
+
+/**
  * Helper: Get platform from URL
  */
 function getPlatformFromUrl(url) {
@@ -219,42 +247,59 @@ function formatDuration(seconds) {
  * Helper: Extract video formats from yt-dlp formats list
  */
 function extractVideoFormats(formats) {
+  // Filter for video formats with actual codecs
   const videoFormats = formats.filter(f => 
-    f.vcodec && f.vcodec !== 'none' && 
-    (f.ext === 'mp4' || f.ext === 'mkv' || f.ext === 'webm')
+    f.vcodec && f.vcodec !== 'none'
   );
 
-  const uniqueQualities = new Map();
+  // Get best audio once (for size calculation)
+  const audioFormats = formats.filter(af => 
+    af.acodec && af.acodec !== 'none' && !af.vcodec
+  );
+  const bestAudio = audioFormats.length > 0 ? audioFormats[0] : null;
+  const audioSize = bestAudio ? (bestAudio.filesize || bestAudio.filesize_approx || 0) : 0;
 
+  // Show each unique quality/resolution only once (keep best version for each quality)
+  const uniqueQualities = new Map();
+  
   videoFormats.forEach(f => {
-    if (f.height) {
-      const quality = f.height + 'p';
-      if (!uniqueQualities.has(quality)) {
-        // Calculate combined size (video + audio)
-        // Get best audio for this quality
-        const audioFormats = formats.filter(af => 
-          af.acodec && af.acodec !== 'none' && !af.vcodec
-        );
-        const bestAudio = audioFormats.length > 0 ? audioFormats[0] : null;
-        const combinedSize = (f.filesize || 0) + (bestAudio?.filesize || 0);
-        
-        uniqueQualities.set(quality, {
-          quality,
-          format: f.ext || 'mp4',
-          fileSize: combinedSize,
-          fileSizeFormatted: formatFileSize(combinedSize),
-          formatId: f.format_id
-        });
-      }
+    // Use height as quality key if available, otherwise width or format_id
+    let qualityKey;
+    if (f.height && f.height > 0) {
+      qualityKey = f.height + 'p';
+    } else if (f.width && f.width > 0) {
+      qualityKey = f.width + 'w';
+    } else if (f.format_id) {
+      qualityKey = f.format_id;
+    } else {
+      return; // Skip if no identifier
+    }
+
+    const videoSize = f.filesize || f.filesize_approx || 0;
+    const combinedSize = videoSize + audioSize;
+    
+    // Keep this version if it's the first one or has larger file size
+    if (!uniqueQualities.has(qualityKey) || combinedSize > uniqueQualities.get(qualityKey).fileSize) {
+      uniqueQualities.set(qualityKey, {
+        quality: qualityKey,
+        format: f.ext || 'mp4',
+        fileSize: combinedSize,
+        fileSizeFormatted: formatFileSize(combinedSize),
+        formatId: f.format_id
+      });
     }
   });
 
-  // Return sorted by quality (highest first)
+  // Return sorted by quality (highest first for numeric qualities)
   return Array.from(uniqueQualities.values())
     .sort((a, b) => {
-      return parseInt(b.quality) - parseInt(a.quality);
-    })
-    .slice(0, 5); // Return top 5 qualities
+      const aNum = parseInt(a.quality);
+      const bNum = parseInt(b.quality);
+      if (!isNaN(aNum) && !isNaN(bNum)) {
+        return bNum - aNum;
+      }
+      return 0;
+    });
 }
 
 /**
@@ -264,37 +309,47 @@ function extractAudioFormats(formats) {
   const audioFormats = formats.filter(f => 
     f.acodec && f.acodec !== 'none' && !f.vcodec
   );
-  
+
   if (audioFormats.length === 0) {
     return [{
-      quality: 'best',
+      quality: 'Audio Only',
       format: 'mp3',
       fileSize: 0,
       fileSizeFormatted: 'Unknown'
     }];
   }
 
-  // Find best audio quality
-  const bestAudio = audioFormats.reduce((best, current) => {
-    const currentAbr = current.abr || 0;
-    const bestAbr = best.abr || 0;
-    return currentAbr > bestAbr ? current : best;
-  });
-
-  return [
-    {
-      quality: 'high (320kbps)',
-      format: 'mp3',
-      fileSize: bestAudio.filesize || 0,
-      fileSizeFormatted: formatFileSize(bestAudio.filesize || 0)
-    },
-    {
-      quality: 'medium (192kbps)',
-      format: 'mp3',
-      fileSize: bestAudio.filesize ? Math.floor(bestAudio.filesize * 0.6) : 0,
-      fileSizeFormatted: formatFileSize(bestAudio.filesize ? Math.floor(bestAudio.filesize * 0.6) : 0)
+  // Sort by bitrate descending and show unique audio options
+  const sorted = audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
+  
+  // Show up to 2 unique audio options with their actual file sizes
+  const audioOptions = [];
+  const seenBitrates = new Set();
+  
+  sorted.forEach((af, idx) => {
+    if (audioOptions.length >= 2) return;
+    
+    const abr = af.abr || Math.floor((af.filesize || af.filesize_approx || 0) / (af.duration || 1) / 128);
+    const abrKey = Math.round(abr / 32) * 32; // Group similar bitrates
+    
+    if (!seenBitrates.has(abrKey)) {
+      seenBitrates.add(abrKey);
+      const fileSize = af.filesize || af.filesize_approx || 0;
+      audioOptions.push({
+        quality: 'Audio Only (' + (fileSize > 0 ? formatFileSize(fileSize) : 'Unknown') + ')',
+        format: af.ext || 'mp3',
+        fileSize: fileSize,
+        fileSizeFormatted: formatFileSize(fileSize)
+      });
     }
-  ];
+  });
+  
+  return audioOptions.length > 0 ? audioOptions : [{
+    quality: 'Audio Only',
+    format: 'mp3',
+    fileSize: 0,
+    fileSizeFormatted: 'Unknown'
+  }];
 }
 
 /**
@@ -316,25 +371,18 @@ function buildFormatString(quality, format) {
     return 'bestaudio';
   }
 
-  // Map quality to yt-dlp format - includes BOTH video and audio
-  switch (quality) {
-    case '2160p':
-      return 'best[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '1440p':
-      return 'best[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '1080p':
-      return 'best[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '720p':
-      return 'best[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '480p':
-      return 'best[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '360p':
-      return 'best[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]+bestaudio/best[ext=mp4]';
-    case '240p':
-      return 'best[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]+bestaudio/best[ext=mp4]';
-    default:
-      return 'best[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]+bestaudio/best[ext=mp4]';
+  // Check if quality is a format_id (alphanumeric) or height-based (numeric with 'p')
+  if (!quality.includes('p') && !quality.match(/^\d+$/)) {
+    // It's likely a format_id, use it directly with audio
+    return `${quality}+bestaudio/best[ext=mp4]`;
   }
+
+  // Extract height from quality string (e.g., "1080p" -> 1080 or "1280p" -> 1280)
+  const heightMatch = quality.match(/(\d+)p/);
+  const height = heightMatch ? heightMatch[1] : '1080';
+
+  // Use exact height match, with fallback to best available
+  return `best[height=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height=${height}][ext=mp4]+bestaudio/best[height<=${height}][ext=mp4]+bestaudio/best[ext=mp4]+bestaudio`;
 }
 
 /**
