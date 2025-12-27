@@ -407,6 +407,7 @@ app.post('/api/download/direct', async (req, res) => {
     res.setHeader('Content-Type', format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/mp4' : 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="download.${ext}"`);
     res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('X-Job-Id', jobId); // Send jobId to client for progress tracking
 
     // Callback for progress updates (for SSE or WebSocket if implemented)
     const onProgress = (progress) => {
