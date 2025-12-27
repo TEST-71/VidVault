@@ -6,7 +6,7 @@ import { dirname, join } from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { createRateLimiter } from './middleware.js';
-import { getVideoInfo, downloadVideo } from './ytdlpHelper.js';
+import { getVideoInfo, downloadVideo, downloadVideoStream } from './ytdlpHelper.js';
 
 dotenv.config();
 
@@ -375,6 +375,91 @@ app.get('/api/download/file/:jobId', (req, res) => {
       }, 1000);
     }
   });
+});
+
+// Direct download - streams directly to client without server storage
+app.post('/api/download/direct', async (req, res) => {
+  const { url, type, quality, format } = req.body;
+
+  if (!url || !type || !quality || !format) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required parameters: url, type, quality, format'
+    });
+  }
+
+  try {
+    const jobId = uuidv4();
+    
+    // Store download job for progress tracking
+    activeDownloads.set(jobId, {
+      status: 'processing',
+      progress: 0,
+      url,
+      type,
+      quality,
+      format,
+      startTime: Date.now()
+    });
+
+    // Set response headers for file download
+    const ext = format === 'mp3' || format === 'm4a' || format === 'wav' || format === 'opus' ? format : 'mp4';
+    res.setHeader('Content-Type', format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/mp4' : 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="download.${ext}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    // Callback for progress updates (for SSE or WebSocket if implemented)
+    const onProgress = (progress) => {
+      if (activeDownloads.has(jobId)) {
+        const download = activeDownloads.get(jobId);
+        download.progress = progress;
+      }
+    };
+
+    // Stream the video directly to client
+    try {
+      const filename = await downloadVideoStream(url, quality, format, res, onProgress);
+      
+      if (activeDownloads.has(jobId)) {
+        const download = activeDownloads.get(jobId);
+        download.status = 'completed';
+        download.progress = 100;
+        download.filename = filename;
+      }
+      
+      console.log(`Direct download completed: ${jobId}`);
+      
+      // Clean up the job entry after some time
+      setTimeout(() => {
+        activeDownloads.delete(jobId);
+      }, 60000); // Keep record for 1 minute
+      
+    } catch (error) {
+      if (activeDownloads.has(jobId)) {
+        const download = activeDownloads.get(jobId);
+        download.status = 'failed';
+        download.error = error.message;
+      }
+      
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: error.message || 'Download failed'
+        });
+      } else {
+        res.end();
+      }
+      
+      console.error(`Direct download failed for job ${jobId}:`, error);
+    }
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to initiate download: ' + error.message
+      });
+    }
+  }
 });
 
 // ==================== Error Handling ====================

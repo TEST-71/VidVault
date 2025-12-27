@@ -12,6 +12,11 @@ export const videoService = {
   getVideoInfo: (url) => api.post('/video/info', { url }),
   initiateDownload: (url, type, quality, format) =>
     api.post('/download', { url, type, quality, format }),
+  directDownload: (url, type, quality, format) =>
+    api.post('/download/direct', { url, type, quality, format }, { 
+      responseType: 'blob',
+      timeout: 600000 // 10 minute timeout for downloads
+    }),
   getDownloadProgress: (jobId) => api.get(`/download/progress/${jobId}`),
   getPlatforms: () => api.get('/platforms'),
   getHealth: () => api.get('/health'),

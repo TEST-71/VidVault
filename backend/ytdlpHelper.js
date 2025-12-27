@@ -386,6 +386,107 @@ function buildFormatString(quality, format) {
 }
 
 /**
+ * Download video directly to a writable stream (for client-side download)
+ * @param {string} url - Video URL
+ * @param {string} quality - Video quality
+ * @param {string} format - File format
+ * @param {Stream} outputStream - Writable stream to pipe to (e.g., res for HTTP response)
+ * @param {Function} onProgress - Progress callback
+ * @returns {Promise<string>} Filename for Content-Disposition header
+ */
+export async function downloadVideoStream(url, quality, format, outputStream, onProgress = null) {
+  return new Promise((resolve, reject) => {
+    // Build yt-dlp arguments to output to stdout
+    const args = [
+      '--socket-timeout', '30',
+      '-f', buildFormatString(quality, format),
+      '-o', '-',  // Output to stdout
+      '--no-warnings',
+      '--merge-output-format', 'mp4',
+      '--progress-template', '[download] %(progress._percent_str)s'
+    ];
+
+    // For audio only
+    if (format === 'mp3' || format === 'm4a' || format === 'wav' || format === 'opus') {
+      args.push('-x');
+      args.push('--audio-format', format);
+      args.push('--audio-quality', buildAudioQuality(quality));
+    }
+
+    args.push(url);
+
+    console.log('Starting stream download for:', url);
+
+    const ytDlpProcess = spawn('python', ['-m', 'yt_dlp', ...args]);
+    let stderr = '';
+    let finished = false;
+    let filename = `download.${format}`;
+
+    const timeout = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        ytDlpProcess.kill();
+        outputStream.destroy();
+        reject(new Error('Download timeout'));
+      }
+    }, 600000); // 10 minute timeout
+
+    // Pipe stdout directly to the output stream
+    ytDlpProcess.stdout.pipe(outputStream);
+
+    // Try to extract filename from stderr
+    ytDlpProcess.stderr.on('data', (data) => {
+      const output = data.toString();
+      stderr += output;
+      console.log('Download progress:', output);
+      
+      // Parse progress percentage
+      if (onProgress) {
+        const progressMatch = output.match(/\[download\]\s+([\d.]+)%/);
+        if (progressMatch) {
+          const progress = Math.min(Math.round(parseFloat(progressMatch[1])), 99);
+          onProgress(progress);
+        }
+      }
+
+      // Extract filename from yt-dlp output
+      const filenameMatch = output.match(/\[download\].*?\s+"(.+?)"/);
+      if (filenameMatch) {
+        filename = filenameMatch[1];
+      }
+    });
+
+    ytDlpProcess.on('error', (err) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timeout);
+        outputStream.destroy();
+        reject(new Error('Failed to spawn yt-dlp: ' + err.message));
+      }
+    });
+
+    ytDlpProcess.on('close', (code) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timeout);
+
+        if (code !== 0) {
+          console.error('Download error:', stderr);
+          outputStream.destroy();
+          reject(new Error('Download failed: ' + stderr));
+          return;
+        }
+
+        // Success - stream has been piped
+        console.log('Stream download completed');
+        if (onProgress) onProgress(100);
+        resolve(filename);
+      }
+    });
+  });
+}
+
+/**
  * Helper: Build audio quality for yt-dlp
  */
 function buildAudioQuality(quality) {

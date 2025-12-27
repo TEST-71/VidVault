@@ -8,32 +8,9 @@ export default function App() {
   const [error, setError] = useState('');
   const [videoData, setVideoData] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
-  const [jobId, setJobId] = useState(null);
 
-  useEffect(() => {
-    if (step === 'downloading' && jobId) {
-      const pollProgress = async () => {
-        try {
-          const response = await videoService.getDownloadProgress(jobId);
-          const { data } = response.data;
-          
-          setDownloadProgress(data.progress);
-          
-          if (data.status === 'completed') {
-            setStep('success');
-          } else if (data.status === 'failed') {
-            setError('Download failed: ' + (data.error || 'Unknown error'));
-            setStep('input');
-          }
-        } catch (err) {
-          console.error('Error checking progress:', err);
-        }
-      };
-
-      const interval = setInterval(pollProgress, 2000);
-      return () => clearInterval(interval);
-    }
-  }, [step, jobId]);
+  // Note: Direct download endpoint streams directly to client
+  // No need for progress polling anymore
 
   const handleDownload = async (e) => {
     e.preventDefault();
@@ -66,32 +43,64 @@ export default function App() {
   const handleStartDownload = async (type, quality, format) => {
     setError('');
     setLoading(true);
+    setDownloadProgress(0);
+    setStep('downloading');
 
     try {
-      const response = await videoService.initiateDownload(url, type, quality, format);
+      // Use direct download endpoint - streams directly to client
+      const response = await videoService.directDownload(url, type, quality, format);
       
-      if (!response.data.success) {
-        throw new Error(response.data.error || 'Failed to initiate download');
+      if (!response.data || response.data.length === 0) {
+        throw new Error('Download returned empty file');
       }
-
-      const newJobId = response.data.data.jobId;
-      setJobId(newJobId);
-      setStep('downloading');
-      setDownloadProgress(0);
+      
+      // Create a blob from the response and trigger download
+      const blob = new Blob([response.data], { 
+        type: type === 'audio' ? 'audio/mpeg' : 'video/mp4' 
+      });
+      
+      if (blob.size === 0) {
+        throw new Error('Downloaded file is empty');
+      }
+      
+      // Extract filename from content-disposition header or create one
+      const contentDisposition = response.headers['content-disposition'];
+      let filename = 'download.mp4';
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      } else {
+        const ext = type === 'audio' ? format : 'mp4';
+        filename = `${videoData?.title || 'download'}.${ext}`;
+      }
+      
+      // Create download link and trigger
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      
+      // Update progress to 100% immediately after download starts
+      setDownloadProgress(100);
+      
+      // Cleanup and show success
+      setTimeout(() => {
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(downloadUrl);
+        setStep('success');
+      }, 500);
+      
     } catch (err) {
-      console.error('Error:', err);
-      setError(err.response?.data?.error || err.message || 'Failed to start download');
+      console.error('Download error:', err);
+      const errorMsg = err.response?.data?.error || err.message || 'Failed to download file';
+      setError(errorMsg);
+      setStep('preview');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const downloadFile = async () => {
-    try {
-      window.location.href = `http://localhost:5000/api/download/file/${jobId}`;
-    } catch (err) {
-      console.error('Error downloading file:', err);
-      setError('Failed to download file');
     }
   };
 
@@ -343,54 +352,34 @@ export default function App() {
           {step === 'success' && (
             <div style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
               <div style={{ backgroundColor: 'white', padding: '3rem', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-                <h2 style={{ fontSize: '36px', marginBottom: '1rem', margin: 0 }}>✅ Success!</h2>
+                <h2 style={{ fontSize: '36px', marginBottom: '1rem', margin: 0 }}>✅ Download Complete!</h2>
                 <p style={{ color: '#666', marginBottom: '2rem', fontSize: '16px', margin: '1rem 0 2rem 0' }}>
-                  Your video is ready to download!
+                  Your file has been saved to your Downloads folder.
                 </p>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                  <button
-                    onClick={downloadFile}
-                    style={{
-                      padding: '12px 16px',
-                      backgroundColor: '#10b981',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '8px',
-                      fontWeight: '600',
-                      fontSize: '15px',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s'
-                    }}
-                    onMouseOver={(e) => e.target.style.backgroundColor = '#059669'}
-                    onMouseOut={(e) => e.target.style.backgroundColor = '#10b981'}
-                  >
-                    ⬇️ Download File
-                  </button>
-                  <button
-                    onClick={() => {
-                      setStep('input');
-                      setUrl('');
-                      setVideoData(null);
-                      setJobId(null);
-                      setDownloadProgress(0);
-                    }}
-                    style={{
-                      padding: '12px 16px',
-                      backgroundColor: '#7c3aed',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '8px',
-                      fontWeight: '600',
-                      fontSize: '15px',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s'
-                    }}
-                    onMouseOver={(e) => e.target.style.backgroundColor = '#6d28d9'}
-                    onMouseOut={(e) => e.target.style.backgroundColor = '#7c3aed'}
-                  >
-                    📥 Download Another
-                  </button>
-                </div>
+                <button
+                  onClick={() => {
+                    setStep('input');
+                    setUrl('');
+                    setVideoData(null);
+                    setDownloadProgress(0);
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    backgroundColor: '#7c3aed',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontWeight: '600',
+                    fontSize: '15px',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.2s'
+                  }}
+                  onMouseOver={(e) => e.target.style.backgroundColor = '#6d28d9'}
+                  onMouseOut={(e) => e.target.style.backgroundColor = '#7c3aed'}
+                >
+                  📥 Download Another
+                </button>
               </div>
             </div>
           )}
