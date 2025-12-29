@@ -10,35 +10,7 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [jobId, setJobId] = useState(null);
 
-  // Poll progress while downloading
-  useEffect(() => {
-    if (step === 'downloading' && jobId) {
-      const pollProgress = async () => {
-        try {
-          const response = await videoService.getDownloadProgress(jobId);
-          const { data } = response.data;
-          
-          setDownloadProgress(Math.min(data.progress, 99)); // Cap at 99% until completion
-          
-          if (data.status === 'completed') {
-            setDownloadProgress(100);
-            setTimeout(() => {
-              setStep('success');
-            }, 500);
-          } else if (data.status === 'failed') {
-            setError('Download failed: ' + (data.error || 'Unknown error'));
-            setStep('preview');
-          }
-        } catch (err) {
-          console.error('Error checking progress:', err);
-        }
-      };
 
-      // Poll every 500ms for smooth animation
-      const interval = setInterval(pollProgress, 500);
-      return () => clearInterval(interval);
-    }
-  }, [step, jobId]);
 
   const handleDownload = async (e) => {
     e.preventDefault();
@@ -68,6 +40,60 @@ export default function App() {
     }
   };
 
+  // Start progress polling
+  const startProgressPolling = (jobIdToTrack) => {
+    console.log('📊 Starting progress polling for jobId:', jobIdToTrack);
+    
+    return new Promise((resolve, reject) => {
+      let isComplete = false;
+      
+      const pollInterval = setInterval(async () => {
+        try {
+          const response = await fetch(`http://localhost:5000/api/download/progress/${jobIdToTrack}`);
+          
+          if (!response.ok) {
+            console.warn('⚠️ Progress endpoint returned:', response.status);
+            return;
+          }
+
+          const data = await response.json();
+          
+          if (data.success && data.data) {
+            const progress = Math.max(data.data.progress || 0, downloadProgress);
+            console.log('📈 Progress:', progress + '%', 'Status:', data.data.status);
+            
+            setDownloadProgress(progress);
+
+            if (data.data.status === 'completed' && !isComplete) {
+              isComplete = true;
+              console.log('✅ Download completed!');
+              setDownloadProgress(100);
+              clearInterval(pollInterval);
+              setTimeout(() => {
+                resolve('completed');
+              }, 500);
+            } else if (data.data.status === 'failed' && !isComplete) {
+              isComplete = true;
+              console.error('❌ Download failed:', data.data.error);
+              clearInterval(pollInterval);
+              reject(new Error(data.data.error || 'Download failed'));
+            }
+          }
+        } catch (err) {
+          console.error('Error polling:', err);
+        }
+      }, 200); // Poll every 200ms
+      
+      // Timeout after 30 minutes
+      setTimeout(() => {
+        if (!isComplete) {
+          clearInterval(pollInterval);
+          reject(new Error('Download timeout'));
+        }
+      }, 1800000);
+    });
+  };
+
   const handleStartDownload = async (type, quality, format) => {
     setError('');
     setLoading(true);
@@ -75,67 +101,96 @@ export default function App() {
     setStep('downloading');
 
     try {
-      // Use direct download endpoint - streams directly to client
-      const response = await videoService.directDownload(url, type, quality, format);
+      console.log('🎬 Starting download:', { url, type, quality, format });
       
-      // Extract jobId from response headers for progress tracking
-      const jobIdFromHeader = response.headers['x-job-id'];
-      if (jobIdFromHeader) {
-        setJobId(jobIdFromHeader);
-      }
-      
-      if (!response.data || response.data.length === 0) {
-        throw new Error('Download returned empty file');
-      }
-      
-      // Create a blob from the response and trigger download
-      const blob = new Blob([response.data], { 
-        type: type === 'audio' ? 'audio/mpeg' : 'video/mp4' 
+      // Make the fetch request
+      const response = await fetch('http://localhost:5000/api/download/direct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, type, quality, format })
       });
-      
-      if (blob.size === 0) {
-        throw new Error('Downloaded file is empty');
+
+      console.log('✅ Got response from backend:', response.status);
+
+      if (!response.ok) {
+        throw new Error(`Download failed: ${response.statusText}`);
       }
+
+      // Extract jobId and filename headers
+      const jobIdFromHeader = response.headers.get('X-Job-Id');
+      const contentDispositionHeader = response.headers.get('content-disposition');
+      console.log('📋 JobId from header:', jobIdFromHeader);
       
-      // Extract filename from content-disposition header or create one
-      const contentDisposition = response.headers['content-disposition'];
-      let filename = 'download.mp4';
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
-        if (filenameMatch) {
-          filename = filenameMatch[1];
+      if (!jobIdFromHeader) {
+        throw new Error('No job ID received from server');
+      }
+
+      setJobId(jobIdFromHeader);
+
+      // Start polling and wait for download to complete
+      try {
+        const pollPromise = startProgressPolling(jobIdFromHeader);
+        
+        // Get blob while polling
+        const blob = await response.blob();
+        console.log('📦 Received blob, size:', blob.size, 'bytes');
+
+        if (blob.size === 0) {
+          throw new Error('Downloaded file is empty');
         }
-      } else {
-        const ext = type === 'audio' ? format : 'mp4';
-        filename = `${videoData?.title || 'download'}.${ext}`;
+
+        // Wait for polling to complete
+        await pollPromise;
+
+        // Extract filename
+        let filename = 'download.mp4';
+        if (contentDispositionHeader) {
+          const filenameMatch = contentDispositionHeader.match(/filename="?([^"]+)"?/);
+          if (filenameMatch) {
+            filename = filenameMatch[1];
+          }
+        } else {
+          const ext = type === 'audio' ? format : 'mp4';
+          filename = `${videoData?.title || 'download'}.${ext}`;
+        }
+
+        console.log('💾 Triggering download with filename:', filename);
+
+        // Trigger browser download
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+
+        // Cleanup
+        setTimeout(() => {
+          document.body.removeChild(link);
+          window.URL.revokeObjectURL(downloadUrl);
+        }, 500);
+
+        // Show success screen
+        setStep('success');
+        setLoading(false);
+        
+      } catch (pollErr) {
+        console.error('Polling error:', pollErr);
+        throw pollErr;
       }
-      
-      // Create download link and trigger
-      const downloadUrl = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      
-      // Cleanup after download is triggered
-      setTimeout(() => {
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(downloadUrl);
-      }, 500);
-      
-      // Progress polling will take over from here via useEffect
-      
+
     } catch (err) {
-      console.error('Download error:', err);
-      const errorMsg = err.response?.data?.error || err.message || 'Failed to download file';
+      console.error('❌ Download error:', err);
+      const errorMsg = err.message || 'Failed to download file';
       setError(errorMsg);
       setStep('preview');
       setJobId(null);
-    } finally {
       setLoading(false);
     }
   };
+
+
+
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#f9fafb' }}>
@@ -480,33 +535,80 @@ export default function App() {
 
           {/* DOWNLOADING STEP */}
           {step === 'downloading' && (
-            <div style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
-              <h2 style={{ fontSize: '28px', fontWeight: 'bold', marginBottom: '2rem', color: 'black' }}>⬇️ Downloading...</h2>
+            <div style={{ maxWidth: '600px', margin: '0 auto', textAlign: 'center' }}>
+              <h2 style={{ fontSize: '28px', fontWeight: 'bold', marginBottom: '2rem', color: 'black', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '24px' }}>⬇️</span> Downloading...
+              </h2>
               <div style={{ 
                 backgroundColor: 'white', 
-                padding: '3rem', 
+                padding: '4rem 3rem', 
                 borderRadius: '16px', 
                 boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
                 border: '1px solid #f0f0f0'
               }}>
+                {/* Progress Bar Container */}
                 <div style={{
-                  background: 'linear-gradient(90deg, #e5e7eb 0%, #f3f4f6 100%)',
-                  borderRadius: '9999px',
-                  height: '24px',
-                  marginBottom: '1.5rem',
-                  overflow: 'hidden',
-                  boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)'
+                  marginBottom: '2rem'
                 }}>
                   <div style={{
-                    background: 'linear-gradient(90deg, #7c3aed 0%, #ec4899 100%)',
-                    height: '100%',
-                    width: `${downloadProgress}%`,
-                    transition: 'width 0.3s ease',
-                    boxShadow: '0 0 10px rgba(124, 58, 237, 0.6)'
-                  }} />
+                    background: '#e5e7eb',
+                    borderRadius: '9999px',
+                    height: '32px',
+                    overflow: 'hidden',
+                    boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)',
+                    position: 'relative'
+                  }}>
+                    {/* Animated Progress Fill */}
+                    <div style={{
+                      background: 'linear-gradient(90deg, #7c3aed 0%, #ec4899 50%, #f97316 100%)',
+                      height: '100%',
+                      width: `${downloadProgress}%`,
+                      transition: 'width 0.2s linear',
+                      borderRadius: '9999px',
+                      boxShadow: `0 0 15px rgba(124, 58, 237, 0.6), inset 0 0 10px rgba(255,255,255,0.3)`,
+                      position: 'relative'
+                    }}>
+                      {/* Shimmer effect */}
+                      <div style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        bottom: 0,
+                        right: 0,
+                        background: 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%)',
+                        animation: 'shimmer 2s infinite'
+                      }} />
+                    </div>
+                  </div>
                 </div>
-                <p style={{ fontSize: '32px', fontWeight: 'bold', background: 'linear-gradient(135deg, #7c3aed 0%, #ec4899 100%)', backgroundClip: 'text', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
-                  {Math.round(downloadProgress)}%
+
+                {/* Percentage Display */}
+                <div style={{ marginBottom: '1rem' }}>
+                  <p style={{ 
+                    fontSize: '48px', 
+                    fontWeight: 'bold', 
+                    background: 'linear-gradient(135deg, #7c3aed 0%, #ec4899 100%)', 
+                    backgroundClip: 'text', 
+                    WebkitBackgroundClip: 'text', 
+                    WebkitTextFillColor: 'transparent',
+                    margin: 0,
+                    transition: 'all 0.2s ease'
+                  }}>
+                    {Math.round(downloadProgress)}%
+                  </p>
+                </div>
+
+                {/* Status Text */}
+                <p style={{ 
+                  fontSize: '14px', 
+                  color: '#666', 
+                  margin: 0,
+                  animation: 'pulse 2s infinite'
+                }}>
+                  {downloadProgress < 25 ? 'Preparing download...' :
+                   downloadProgress < 50 ? 'Downloading...' :
+                   downloadProgress < 75 ? 'Almost there...' :
+                   downloadProgress < 100 ? 'Finishing up...' : 'Download complete!'}
                 </p>
               </div>
             </div>
@@ -517,15 +619,32 @@ export default function App() {
             <div style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
               <div style={{ 
                 backgroundColor: 'white', 
-                padding: '3rem', 
+                padding: '4rem 3rem', 
                 borderRadius: '16px', 
                 boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
                 border: '1px solid #f0f0f0',
                 animation: 'slideUp 0.5s ease'
               }}>
-                <div style={{ fontSize: '64px', marginBottom: '1rem', animation: 'bounce 0.6s ease' }}>✅</div>
-                <h2 style={{ fontSize: '32px', fontWeight: 'bold', marginBottom: '1rem', margin: 0, background: 'linear-gradient(135deg, #10b981 0%, #06b6d4 100%)', backgroundClip: 'text', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Download Complete!</h2>
-                <p style={{ color: '#666', fontSize: '16px', margin: '1rem 0 2rem 0', lineHeight: '1.6' }}>
+                <div style={{ fontSize: '80px', marginBottom: '1.5rem', animation: 'bounce 0.6s ease' }}>
+                  ✅
+                </div>
+                <h2 style={{ 
+                  fontSize: '32px', 
+                  fontWeight: 'bold', 
+                  margin: '0 0 1rem 0', 
+                  background: 'linear-gradient(135deg, #10b981 0%, #06b6d4 100%)', 
+                  backgroundClip: 'text', 
+                  WebkitBackgroundClip: 'text', 
+                  WebkitTextFillColor: 'transparent' 
+                }}>
+                  Download Complete!
+                </h2>
+                <p style={{ 
+                  color: '#666', 
+                  fontSize: '16px', 
+                  margin: '1rem 0 2rem 0', 
+                  lineHeight: '1.6' 
+                }}>
                   Your file has been saved to your Downloads folder. Ready to download more?
                 </p>
                 <button
@@ -534,6 +653,8 @@ export default function App() {
                     setUrl('');
                     setVideoData(null);
                     setDownloadProgress(0);
+                    setJobId(null);
+                    setLoading(false);
                   }}
                   style={{
                     width: '100%',
@@ -597,6 +718,22 @@ export default function App() {
           }
           50% {
             transform: translateY(-10px);
+          }
+        }
+        @keyframes shimmer {
+          0% {
+            left: -100%;
+          }
+          100% {
+            left: 100%;
+          }
+        }
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.7;
           }
         }
       `}</style>
