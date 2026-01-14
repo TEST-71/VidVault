@@ -203,16 +203,42 @@ export async function downloadVideo(url, quality, format, outputPath, onProgress
  * Helper: Get thumbnail from different sources
  */
 function getThumbnail(data) {
-  // Try different thumbnail sources
+  // Try primary thumbnail field
   if (data.thumbnail) return data.thumbnail;
+  
+  // Try thumbnails array (YouTube, etc)
   if (data.thumbnails && Array.isArray(data.thumbnails) && data.thumbnails.length > 0) {
     // Return the last/largest thumbnail
     return data.thumbnails[data.thumbnails.length - 1].url;
   }
+  
+  // Instagram: try alt_title for image URL or check ext_data
+  if (data.ext && data.ext === 'instagram') {
+    // Try original_url field for Instagram
+    if (data.original_url) return data.original_url;
+    // Try webpage_url_basename or other Instagram-specific fields
+    if (data.display_url) return data.display_url;
+  }
+  
+  // Try alternate thumbnail fields
   if (data.thumb) return data.thumb;
+  
+  // Try artwork array (Apple Music, etc)
   if (data.artwork && Array.isArray(data.artwork) && data.artwork.length > 0) {
     return data.artwork[0];
   }
+  
+  // Try image field (some platforms)
+  if (data.image) return data.image;
+  
+  // Try images array
+  if (data.images && Array.isArray(data.images) && data.images.length > 0) {
+    return data.images[0];
+  }
+  
+  // Try webpage_url as last resort (some platforms embed thumbnail in page)
+  if (data.webpage_url) return data.webpage_url;
+  
   return '';
 }
 
@@ -299,7 +325,11 @@ function extractVideoFormats(formats) {
         return bNum - aNum;
       }
       return 0;
-    });
+    })
+    .map(fmt => ({
+      ...fmt,
+      label: `${fmt.quality} (${fmt.fileSizeFormatted})`
+    }));
 }
 
 /**
@@ -315,7 +345,8 @@ function extractAudioFormats(formats) {
       quality: 'Audio Only',
       format: 'mp3',
       fileSize: 0,
-      fileSizeFormatted: 'Unknown'
+      fileSizeFormatted: 'Unknown',
+      label: 'Audio Only'
     }];
   }
 
@@ -344,11 +375,15 @@ function extractAudioFormats(formats) {
     }
   });
   
-  return audioOptions.length > 0 ? audioOptions : [{
+  return audioOptions.length > 0 ? audioOptions.map(opt => ({
+    ...opt,
+    label: opt.quality
+  })) : [{
     quality: 'Audio Only',
     format: 'mp3',
     fileSize: 0,
-    fileSizeFormatted: 'Unknown'
+    fileSizeFormatted: 'Unknown',
+    label: 'Audio Only'
   }];
 }
 
